@@ -182,17 +182,56 @@ python3 scripts/transcribe.py --input-file /path/to/video.mp4 --output-dir ./sub
 
 错误分支彼此区分：HTTP 401/403（鉴权失败，附带服务方返回的原因）、网络超时或连接失败、非 JSON 响应、其他非 2xx 状态、以及 HTTP 2xx 但缺少播放地址。**拿到标题、作者或封面不等于视频可下载。**
 
+### 为什么解析不通，以及怎么恢复
+
+`sph.litao.workers.dev` 是上游开源项目 [`ltaoo/wx_channels_download`](https://github.com/ltaoo/wx_channels_download) 的 `sph` Cloudflare Worker 的公开部署。这个 401 不是故障，是上游**主动加的访问控制**：
+
+- 上游作者在 [issue #495](https://github.com/ltaoo/wx_channels_download/issues/495)（2026-08-13）说明：依赖的元宝账号被封禁，**「后续会增加凭证校验功能」**。
+- 上游部署文档（`deploy sph`）要求注入 `ACCESS_CREDENTIAL` 环境变量作为「页面及 API 的访问凭证」，**认证失败返回 401，未配置返回 503**；支持 `Authorization: Bearer <凭证>` 与 Basic Auth `wxchannels:<凭证>` 两种方式。
+- 凭证由**部署者自己设定**，第三方无从获取——所以这个公开地址不会自己恢复。
+
+结论：**要自动化解析，必须有自己的凭证；公开地址的凭证你拿不到。**
+
+**路径 A：自建一个属于自己的查询 Worker**（要自动化就走这条）
+
+```bash
+# 上游 CLI；在配置文件里设置
+#   cloudflare.accountId   Cloudflare 账号 ID
+#   cloudflare.apiToken    Workers 读写权限的 API Token
+#   cloudflare.sphWorkerName  自定义 Worker 名称
+#   cloudflare.sphCookie  登录 https://yuanbao.tencent.com/ 后的 Web 端 cookie（约 1 个月过期）
+#   cloudflare.sphCredential  你自己设定的访问凭证
+wx_video_download deploy sph
+```
+
+部署完成后：
+
+```bash
+export WECHAT_VIDEO_API_URL="https://<sphWorkerName>.<subdomain>.workers.dev/api/fetch_video_profile"
+export WECHAT_VIDEO_API_TOKEN="<你设定的 sphCredential>"
+python3 scripts/transcribe.py "https://weixin.qq.com/sph/AOVsoW8dBI" --resolve-only
+```
+
+> ⚠️ 上游明确提示：**仅自己使用，不要对外提供**，元宝 cookie 有被限制使用的风险。请遵守微信与元宝的服务条款。
+
+**路径 B：用上游客户端在本机下载，再离线转写**（不碰 cookie，但需手动点下载）
+
+```bash
+python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
+```
+
 ### 实测结论
 
 | 检查项 | 结果 |
 |--------|------|
 | 直连 `sph.litao.workers.dev` | 连接超时，需经代理 |
 | 经本机 HTTP 代理访问 | `HTTP 401 {"error":"unauthorized"}` |
+| 公开部署的凭证来源 | 由部署者设定，第三方无法获取（上游 issue #495 + 部署文档） |
 | 微信短链信息接口 `get_feed_info` | 匿名至多返回作者/描述/封面等元数据；本次复测直接返回 `HTTP 401 permission verification failed`，始终没有播放地址 |
 | 用返回的 `dynamicExportId` 作为 `exportId` 查询视频信息 | `permission verification failed` |
 | 完整下载 + 转写 | **未验证**：缺少有效凭证，测试机也未安装 `ffmpeg` / `whisper` |
 
-结论：**解析链路在拿到服务方凭证前无法恢复**；本次发布的是经过审查的兼容性补丁、鉴权支持与错误处理改进，离线转写入口（`--input-file`）始终可用。
+结论：**这个 401 是服务方的设计，不是脚本故障**；脚本已正确鉴权与报错，但**解析链路在用户自备凭证前不可用**。离线转写入口（`--input-file`）始终可用。
 
 ## License
 

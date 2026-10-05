@@ -114,5 +114,13 @@ export WECHAT_VIDEO_PROXY="http://127.0.0.1:10808"
 ## 已知限制（2026-10-05 实测）
 
 - 匿名调用 `sph.litao.workers.dev` 返回 `HTTP 401`，本机直连该域名还会超时，需要代理。
+- **这个 401 是上游的设计，不是脚本故障**：该项目依赖的元宝账号被封，作者在 [issue #495](https://github.com/ltaoo/wx_channels_download/issues/495)（2026-08-13）宣布「后续会增加凭证校验」，其 `deploy sph` 文档要求注入 `ACCESS_CREDENTIAL` 作为访问凭证（认证失败 401 / 未配置 503）。凭证由部署者自己设定，第三方拿不到。
 - 微信短链信息接口 `channels.weixin.qq.com/finder-preview/api/feed/get_feed_info` 匿名至多给出作者、描述、封面，没有播放地址；本次复测直接返回 `permission verification failed`。用其中的 `dynamicExportId` 当 `exportId` 再查同样失败。
-- 因此**完整下载 + 转写链路在取得服务方凭证前未经验证**，不要对外声称已恢复。无凭证时应退回 `--input-file` 离线转写。
+- 因此**完整下载 + 转写链路在用户自备凭证前不可用**，不要对外声称已恢复。
+
+## 凭证拿不到时怎么办
+
+按用户的实际需求二选一，不要尝试绕过鉴权：
+
+1. **要自动化解析** → 让用户按上游文档自建自己的 `sph` Worker（`wx_video_download deploy sph`，需要 Cloudflare 账号 + 元宝 Web cookie），拿到 `sphCredential` 后设置 `WECHAT_VIDEO_API_URL` 与 `WECHAT_VIDEO_API_TOKEN`，再用 `--resolve-only` 验证。提醒上游「仅自己使用」的警告与 cookie 被限制的风险。
+2. **只需一次转写** → 让用户用上游客户端把视频下载到本地，再用 `--input-file` 转写，这条路径不依赖任何凭证。
