@@ -1,6 +1,6 @@
 ---
 name: wechat-video-transcribe
-description: 微信视频号视频下载 + 语音转文字（Whisper）。提取微信视频号（Channels）视频并生成 SRT 字幕和纯文本转录。触发词：微信视频号、视频字幕提取、语音转文字、Whisper转写、提取视频中的文字、视频转逐字稿。
+description: 微信视频号视频下载 + 语音转文字（Whisper）。提取微信视频号（Channels）视频并生成 SRT 字幕和纯文本转录。链接解析需服务方访问凭证，无凭证时可用 --input-file 转写本地视频。触发词：微信视频号、视频字幕提取、语音转文字、Whisper转写、提取视频中的文字、视频转逐字稿。
 ---
 
 # 微信视频号下载 + Whisper 转写
@@ -12,9 +12,18 @@ description: 微信视频号视频下载 + 语音转文字（Whisper）。提取
 ## 依赖
 
 执行前确认以下工具可用：
-- `curl` — 下载视频
+- `curl` — 调用解析接口并下载视频
 - `ffmpeg` — 提取音频
 - `whisper` CLI — 语音识别（`pip install openai-whisper` 后自动安装）
+
+## 前提：解析接口需要访问凭证
+
+自 2026-10-05 起，默认第三方解析服务 `sph.litao.workers.dev` 已启用访问控制，匿名请求返回 `HTTP 401 {"error":"unauthorized"}`。
+
+- 链接解析**必须**提供服务方签发的凭证，通过 `WECHAT_VIDEO_API_TOKEN` 注入（脚本以 `Authorization: Bearer` 发送，不写文件、不打印到日志）。
+- 无凭证时不要尝试绕过鉴权：改用 `--input-file` 转写用户已下载的本地视频，或告知用户需要向服务方申请凭证。
+- 需要代理时设置 `WECHAT_VIDEO_PROXY`（curl 本身也遵循 `https_proxy` / `ALL_PROXY`）。
+- 拿到标题、作者或封面**不代表**视频可下载，务必确认响应里有播放地址。
 
 ## 工作流
 
@@ -24,10 +33,14 @@ description: 微信视频号视频下载 + 语音转文字（Whisper）。提取
 curl -s -X POST "https://sph.litao.workers.dev/api/fetch_video_profile" \
   -H "Content-Type: application/json" \
   -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+  -H "Authorization: Bearer <WECHAT_VIDEO_API_TOKEN>" \
   -d '{"url": "<微信视频号分享链接>"}'
 ```
 
-返回 JSON 中包含 `video_url`、`title`、`author` 等字段。提取 `video_url` 供下一步使用。
+播放地址字段随服务版本变化，需同时兼容：
+
+- 旧版（扁平）：顶层 `video_url`
+- 新版（嵌套）：`data.feedInfo.h264VideoInfo.videoUrl` / `h265VideoInfo.videoUrl` / `feedInfo.videoUrl`
 
 常见分享链接格式：
 - `https://weixin.qq.com/sph/XXXXX`
@@ -83,5 +96,23 @@ awk 'NR%4==3' audio.srt > transcript.txt
 也可以直接用捆绑的 Python 脚本一键完成全流程：
 
 ```bash
-python3 scripts/transcribe.py <微信视频号链接> [--model base|small|medium]
+# 全流程：解析 → 下载 → 提取音频 → Whisper 转写
+python3 scripts/transcribe.py <微信视频号链接> [--model base|small|medium] [--output-dir ./]
+
+# 只验证解析是否可用，不下载也不加载 Whisper
+python3 scripts/transcribe.py <微信视频号链接> --resolve-only
+
+# 转写已下载到本地的视频/音频，不依赖解析服务（无凭证时的可用路径）
+python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
+
+# 解析与下载走代理
+export WECHAT_VIDEO_PROXY="http://127.0.0.1:10808"
 ```
+
+脚本会区分并明确报出：HTTP 401/403（鉴权）、网络超时/连接失败、非 JSON 响应、其他非 2xx 状态、以及 2xx 但缺少播放地址。下载失败（链接过期等）通过 `curl --fail` 直接报错，不会把错误页存成视频文件。
+
+## 已知限制（2026-10-05 实测）
+
+- 匿名调用 `sph.litao.workers.dev` 返回 `HTTP 401`，本机直连该域名还会超时，需要代理。
+- 微信短链信息接口 `channels.weixin.qq.com/finder-preview/api/feed/get_feed_info` 匿名至多给出作者、描述、封面，没有播放地址；本次复测直接返回 `permission verification failed`。用其中的 `dynamicExportId` 当 `exportId` 再查同样失败。
+- 因此**完整下载 + 转写链路在取得服务方凭证前未经验证**，不要对外声称已恢复。无凭证时应退回 `--input-file` 离线转写。

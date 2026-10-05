@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 运行产物
+audio.srt
+transcript.txt
+video.mp4
+audio.wav
