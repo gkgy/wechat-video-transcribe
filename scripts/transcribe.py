@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """微信视频号 → Whisper 字幕，一键流水线。
 
-解析方式（三选一）:
-    1. --video-url        直接给定播放地址（自己抓包/开发者工具拿到），完全不走解析接口
-    2. YUANBAO_COOKIE     本机直跑解析链路：元宝 get_parse_result → 微信 get_feed_info（无需任何自建服务）
-    3. WECHAT_VIDEO_API_URL / WECHAT_VIDEO_API_TOKEN   指向你自己部署的解析接口
+输入方式（四选一）:
+    1. --input-file       本地视频/音频文件，完全离线，不需要任何凭证（零风险）
+    2. --video-url        直接给定播放地址（抓包/代理工具拿到），完全不走解析接口（零风险）
+    3. --har              从抓包文件（HAR 或纯文本 URL 列表）里自动提取播放地址（零风险）
+    4. YUANBAO_COOKIE     本机直跑解析链路：元宝 get_parse_result → 微信 get_feed_info
+                          （无需自建服务，但会使用你的元宝账号，存在账号风险）
+       或 WECHAT_VIDEO_API_URL / WECHAT_VIDEO_API_TOKEN   指向你自己部署的解析接口
 
 用法:
     python3 transcribe.py <微信视频号链接> [--model base|small|medium] [--output-dir ./]
@@ -15,6 +18,7 @@
     python3 transcribe.py "https://weixin.qq.com/sph/Ap5KZZrF3F" --resolve-only
     python3 transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
     python3 transcribe.py --video-url "https://finder.video.qq.com/....mp4" --output-dir ./subtitles
+    python3 transcribe.py --har capture.har --output-dir ./subtitles
 
 环境变量:
     YUANBAO_COOKIE          元宝 Web 端 Cookie；设定后本机直跑解析，不需要自建服务
@@ -28,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -108,6 +113,13 @@ def normalize_profile(data: dict) -> dict:
     }
 
 
+AUTH_HINT = (
+    "该访问凭证需要服务方签发；如果这是已停用的公共地址，请改用零风险方式："
+    "--input-file（转写本地视频）、--video-url（已有播放地址）或 --har（从抓包文件提取直链）；"
+    "也可以自备元宝 Cookie 走本机直跑（设置 YUANBAO_COOKIE）。"
+)
+
+
 def proxy_args() -> list[str]:
     """Honor an explicit proxy override on top of curl's own *_proxy env vars."""
     proxy = os.environ.get("WECHAT_VIDEO_PROXY", "").strip()
@@ -149,14 +161,12 @@ def fetch_video_profile(video_url: str) -> dict:
         data = json.loads(body)
     except json.JSONDecodeError:
         if status in ("401", "403"):
-            raise RuntimeError(f"解析接口拒绝访问（HTTP {status}）。"
-                               "请向服务方获取有效凭证并设置 WECHAT_VIDEO_API_TOKEN。")
+            raise RuntimeError(f"解析接口拒绝访问（HTTP {status}）。{AUTH_HINT}")
         raise RuntimeError(f"解析接口返回非 JSON 数据（HTTP {status}）")
     detail = provider_message(data)
     if status in ("401", "403"):
         suffix = f"：{detail}" if detail else ""
-        raise RuntimeError(f"解析接口拒绝访问（HTTP {status}）{suffix}。"
-                           "请向服务方获取有效凭证并设置 WECHAT_VIDEO_API_TOKEN。")
+        raise RuntimeError(f"解析接口拒绝访问（HTTP {status}）{suffix}。{AUTH_HINT}")
     if not status.startswith("2"):
         raise RuntimeError(f"解析接口 HTTP {status}" + (f"：{detail}" if detail else ""))
     profile = normalize_profile(data)
@@ -279,6 +289,8 @@ def download_video(video_url: str, output_path: str) -> None:
         ], timeout=600)
     except RuntimeError as exc:
         raise RuntimeError("视频下载失败：链接可能已过期或需要重新解析（curl 已启用 --fail）") from exc
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        raise RuntimeError("视频下载失败：没有拿到文件内容，链接可能已过期或需要重新解析")
     size_mb = os.path.getsize(output_path) / 1024 / 1024
     print(f"  已保存: {output_path} ({size_mb:.1f} MB)")
 
@@ -327,20 +339,114 @@ def resolve(share_url: str) -> dict:
     return fetch_video_profile(share_url)
 
 
+# --- 零风险路径：从抓包文件里提取播放地址（不使用任何账号凭证） -------------
+
+SEGMENT_SUFFIXES = (".m4s", ".ts")
+URL_PATTERN = re.compile(r"https?://[^\s\"'<>\\]+")
+
+
+def _looks_like_segment(url: str, mime: str) -> bool:
+    """MSE/HLS segment rather than a whole file — not downloadable on its own."""
+    if "iso.segment" in mime.lower():
+        return True
+    return urlparse(url).path.lower().endswith(SEGMENT_SUFFIXES)
+
+
+def _score_candidate(url: str, mime: str) -> int:
+    host = urlparse(url).netloc.lower()
+    low = url.lower()
+    score = 0
+    if "video.qq.com" in host:
+        score += 3
+    if mime.lower().startswith("video/"):
+        score += 3
+    if low.endswith(".mp4") or ".mp4?" in low or ".mp4#" in low:
+        score += 3
+    return score
+
+
+def _collect_urls(har_path: Path) -> list[tuple[str, str]]:
+    """Return (url, mime) pairs from a HAR export, or from a plain URL list."""
+    raw = har_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        har = json.loads(raw)
+    except json.JSONDecodeError:
+        return [(u, "") for u in URL_PATTERN.findall(raw)]
+    entries = ((har or {}).get("log") or {}).get("entries") or []
+    found: list[tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        request = entry.get("request")
+        url = request.get("url") if isinstance(request, dict) else None
+        if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
+            continue
+        response = entry.get("response")
+        mime = ""
+        if isinstance(response, dict):
+            mime = str(response.get("mimeType") or "")
+        found.append((url, mime))
+    return found
+
+
+def resolve_from_har(har_path: Path) -> str:
+    """Extract a playable URL from a capture file without touching any account credential."""
+    print(f"\n🔎 从抓包文件提取播放地址：{har_path}")
+    try:
+        entries = _collect_urls(har_path)
+    except OSError as exc:
+        raise RuntimeError(f"无法读取抓包文件：{exc}") from exc
+    if not entries:
+        raise RuntimeError("抓包文件里没有找到任何 URL。")
+    whole: list[tuple[int, str]] = []
+    segments = 0
+    for url, mime in entries:
+        if _looks_like_segment(url, mime):
+            segments += 1
+            continue
+        score = _score_candidate(url, mime)
+        if score:
+            whole.append((score, url))
+    ranked: dict[str, int] = {}
+    for score, url in whole:
+        ranked[url] = max(ranked.get(url, 0), score)
+    candidates = sorted(((s, u) for u, s in ranked.items()), key=lambda item: (-item[0], item[1]))
+    for score, url in candidates[:5]:
+        print(f"  候选[{score}] {url}")
+    if not candidates:
+        hint = "只看到分片流（MSE/HLS），无法直接下载整段视频。" if segments else "没有识别到视频地址。"
+        raise RuntimeError(
+            f"{hint}注意：用普通浏览器打开分享页拿不到地址——官方页面的取流逻辑只在微信环境内执行"
+            "（JS 里判断 WeixinJSBridge 环境后才调 getFeedInfo）。建议改用 --input-file 转写"
+            "已经下载到本地的视频，或在微信 PC 客户端/手机端抓包后再用 --har。"
+        )
+    best_score, best = candidates[0]
+    if best_score < 3:
+        raise RuntimeError("候选地址可信度不足，无法确定是否为完整视频。请从上面的列表挑一个"
+                           "并用 --video-url 指定。")
+    if len(candidates) > 1 and candidates[1][0] == best_score:
+        raise RuntimeError("抓包文件里有多个同权重候选，无法自动判断。请从上面的列表挑一个，"
+                           "改用 --video-url 指定。")
+    print(f"  选用: {best}")
+    return best
+
+
 def main():
     parser = argparse.ArgumentParser(description="微信视频号 → 语音转文字")
     parser.add_argument("url", nargs="?", help="微信视频号分享链接")
     parser.add_argument("--input-file", type=Path, help="转写本地视频或音频，跳过链接解析")
     parser.add_argument("--video-url", help="直接给定视频播放地址（自己抓包/开发者工具获取），跳过解析")
+    parser.add_argument("--har", type=Path,
+                        help="从抓包文件提取播放地址：浏览器/代理导出的 HAR，或纯文本 URL 列表（零风险）")
     parser.add_argument("--resolve-only", action="store_true", help="仅验证链接解析，不下载或转写")
     parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium"],
                         help="Whisper 模型大小 (默认: base)")
     parser.add_argument("--output-dir", default="./", help="输出目录 (默认: ./)")
     args = parser.parse_args()
 
-    sources = [bool(args.url), bool(args.input_file), bool(args.video_url)]
+    sources = [bool(args.url), bool(args.input_file), bool(args.video_url), bool(args.har)]
     if sum(sources) != 1:
-        parser.error("请提供分享链接、--input-file 或 --video-url，三选一")
+        parser.error("请提供分享链接、--input-file、--video-url 或 --har，四选一")
     if args.resolve_only:
         if not args.url:
             parser.error("--resolve-only 需要分享链接")
@@ -348,6 +454,8 @@ def main():
         return
     if args.input_file and not args.input_file.is_file():
         parser.error("本地输入文件不存在")
+    if args.har and not args.har.is_file():
+        parser.error("抓包文件不存在")
 
     # Pre-flight checks
     ensure_tool("curl", "brew install curl")
@@ -367,6 +475,8 @@ def main():
         else:
             if args.video_url:
                 video_url = args.video_url
+            elif args.har:
+                video_url = resolve_from_har(args.har)
             else:
                 video_url = resolve(args.url)["video_url"]
             # Step 2: Download

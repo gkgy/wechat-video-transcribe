@@ -12,13 +12,13 @@
 >
 > **凭证由部署者自己设定，第三方拿不到，所以这个公开地址不会自己恢复，等也没用。**
 >
-> 想继续解析链接，有三条路，**按省事程度排序**：
+> 想继续拿到视频，有三类做法，**按风险从低到高**排：
 >
-> 1. **本机直跑解析**（最省事，不用部署任何服务）——设好 `YUANBAO_COOKIE` 即可，见 [方案一](#方案一本机直跑解析最省事)。
-> 2. **自己部署一个查询 Worker**——见 [方案二](#方案二自建-cloudflare-查询-worker)。
-> 3. **绕开解析**——自己拿到播放地址用 `--video-url`，或把视频落到本地用 `--input-file`，见 [方案三](#方案三完全绕开解析)。
+> 1. **完全离线零风险**——用 `--input-file` 转写本地视频、用 `--video-url` 指定直链、或用 `--har` 从抓包文件自动提取直链。**不碰任何账号凭证**，见 [方案 A](#方案-a完全离线零风险)。
+> 2. **本机直跑解析**——设好 `YUANBAO_COOKIE`，不需要部署任何服务，但**会使用你的元宝账号，存在封号风险**，见 [方案 B](#方案-b本机直跑解析)。
+> 3. **自建一个查询 Worker**——见 [方案 C](#方案-c自建-cloudflare-查询-worker)。
 >
-> 本仓库**不绕过、不破解任何鉴权**，所有方案都使用你自己的账号凭证。
+> **封号风险到底落在谁头上、值不值得用，见 [先说风险](#先说风险用不用你自己的账号是分水岭)。** 本仓库**不绕过、不破解任何鉴权**，所有联网方案都使用你自己的账号凭证。
 
 ---
 
@@ -26,7 +26,7 @@
 
 一条命令完成微信视频号视频的全自动语音转文字流水线：
 
-1. 解析微信视频号分享链接，获取真实视频地址（**公共接口已停用**，用你自己的元宝 Cookie 本机直跑，或自建 Worker，见文末）
+1. 解析微信视频号分享链接，获取真实视频地址（**公共接口已停用**；零风险做法见方案 A，用账号的做法见方案 B/C，均在文末）
 2. 下载视频（带 Referer 绕过 CDN 限制）
 3. 提取 16kHz 单声道 WAV 音频
 4. OpenAI Whisper 中文语音转写
@@ -63,13 +63,13 @@ pip install openai-whisper
 ## 快速开始
 
 ```bash
-# 0. 配置解析方式（三选一，详见文末「三条替代方案」）
-#    最省事：本机直跑，只需要你自己的元宝登录 Cookie
+# 0. 配置解析方式（可选，详见文末「可选方案总览」）
+#    零风险：什么都不用配，用 --input-file / --video-url / --har 三选一
+#    有账号风险：本机直跑，只需要你自己的元宝登录 Cookie（建议用闲置小号）
 export YUANBAO_COOKIE="<你的元宝 Web 端 Cookie>"
 #    或者：指向你自己部署的解析 Worker
 # export WECHAT_VIDEO_API_URL="https://<你的 worker>/api/fetch_video_profile"
 # export WECHAT_VIDEO_API_TOKEN="<你设定的凭证>"
-#    都不配也能用：--video-url 直链 / --input-file 本地文件，不需要任何凭证
 
 # 一行命令生成字幕和逐字稿
 python3 scripts/transcribe.py "https://weixin.qq.com/sph/Ap5KZZrF3F"
@@ -83,10 +83,13 @@ python3 scripts/transcribe.py "https://weixin.qq.com/sph/Ap5KZZrF3F" --output-di
 # 只测试解析是否可用（不下载、不加载 Whisper）
 python3 scripts/transcribe.py "https://weixin.qq.com/sph/Ap5KZZrF3F" --resolve-only
 
-# 直接给定播放地址（自己抓包/开发者工具拿到），跳过所有解析，不需要凭证
+# 零风险入口：直接给定播放地址（抓包拿到），跳过所有解析，不需要凭证
 python3 scripts/transcribe.py --video-url "https://finder.video.qq.com/....mp4" --output-dir ./subtitles
 
-# 转写已下载到本地的视频，不依赖解析服务
+# 零风险入口：从抓包文件（HAR 或纯文本 URL 列表）自动提取直链
+python3 scripts/transcribe.py --har ./capture.har --output-dir ./subtitles
+
+# 零风险入口：转写已下载到本地的视频/音频
 python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
 ```
 
@@ -117,7 +120,7 @@ python3 scripts/transcribe.py "<链接>" --model medium
 如果你想要更精细的控制，也可以分步执行：
 
 ```bash
-# 1a. 解析链接（方案一：本机直跑，用自己的元宝 Cookie）
+# 1a. 解析链接（方案 B：本机直跑，用自己的元宝 Cookie —— 有账号风险）
 curl -s -X POST "https://yuanbao.tencent.com/api/weixin/get_parse_result" \
   -H "Content-Type: application/json" \
   -H "Cookie: <你的元宝 Cookie>" \
@@ -129,14 +132,17 @@ curl -s -X POST "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed
   -d '{"baseReq":{"generalToken":"<token>"},"exportId":"<eid>"}'
 # → data.feedInfo.h264VideoInfo.videoUrl 就是播放地址
 
-# 1b. 解析链接（方案二：你自建的 Worker）
+# 1b. 解析链接（方案 C：你自建的 Worker —— 账号风险同方案 B）
 curl -s -X POST "https://<你的 worker>/api/fetch_video_profile" \
   -H "Content-Type: application/json" \
   -H "User-Agent: Mozilla/5.0 ..." \
   -H "Authorization: Bearer <你设定的凭证>" \
   -d '{"url":"<视频号链接>"}'
 
-# 1c. 方案三：自己抓包拿到直链，跳过解析
+# 1c. 方案 A：零凭证。从抓包文件自动提取直链，或直接指定地址/本地文件
+python3 scripts/transcribe.py --har ./capture.har --output-dir ./subtitles
+python3 scripts/transcribe.py --video-url "https://finder.video.qq.com/....mp4" --output-dir ./subtitles
+python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
 
 # 2. 下载视频
 curl -L -o video.mp4 \
@@ -179,15 +185,17 @@ awk 'NR%4==3' audio.srt > transcript.txt
 
 ## 解析接口与限制（2026-10-05 实测）
 
-本项目默认调用的第三方解析服务 `sph.litao.workers.dev` **已停止对外开放**：上游账号被封后启用了凭证校验，匿名请求返回 `HTTP 401 {"error":"unauthorized"}`，公开地址不会自行恢复。替代方案见下一节（共三种）。本项目不绕过、不破解任何鉴权。
+本项目默认调用的第三方解析服务 `sph.litao.workers.dev` **已停止对外开放**：上游账号被封后启用了凭证校验，匿名请求返回 `HTTP 401 {"error":"unauthorized"}`，公开地址不会自行恢复。替代方案见下一节，**按风险从低到高排**。本项目不绕过、不破解任何鉴权。
 
 ### 配置
 
 ```bash
-# 方案一：本机直跑解析（推荐，不需要任何自建服务）
+# 方案 A：零风险，不需要任何配置，用 --input-file / --video-url / --har
+
+# 方案 B：本机直跑解析（⚠️ 使用你的元宝账号，建议用闲置小号）
 export YUANBAO_COOKIE="<你的元宝 Web 端 Cookie>"
 
-# 方案二：自建查询 Worker 的地址与凭证
+# 方案 C：自建查询 Worker 的地址与凭证（⚠️ 账号风险同方案 B）
 export WECHAT_VIDEO_API_URL="https://your-worker.workers.dev/api/fetch_video_profile"
 export WECHAT_VIDEO_API_TOKEN="<你在部署 Worker 时设定的凭证>"
 
@@ -201,10 +209,13 @@ export WECHAT_VIDEO_PROXY="http://127.0.0.1:<你的代理端口>"
 # 只验证解析，不加载 Whisper
 python3 scripts/transcribe.py "https://weixin.qq.com/sph/A4waITx8sO" --resolve-only
 
-# 直接给定播放地址（自己抓包拿到），跳过所有解析
+# 零风险：从抓包文件提取直链后跑全流程
+python3 scripts/transcribe.py --har ./capture.har --output-dir ./subtitles
+
+# 零风险：直接给定播放地址，跳过所有解析
 python3 scripts/transcribe.py --video-url "https://finder.video.qq.com/....mp4" --output-dir ./subtitles
 
-# 已下载的视频/音频离线转写，完全不依赖解析服务
+# 零风险：已下载的视频/音频离线转写，完全不依赖解析服务
 python3 scripts/transcribe.py --input-file /path/to/video.mp4 --output-dir ./subtitles
 ```
 
@@ -219,9 +230,9 @@ python3 scripts/transcribe.py --input-file /path/to/video.mp4 --output-dir ./sub
 
 错误分支彼此区分：HTTP 401/403（鉴权失败，附带服务方返回的原因）、网络超时或连接失败、非 JSON 响应、其他非 2xx 状态、以及 HTTP 2xx 但缺少播放地址。**拿到标题、作者或封面不等于视频可下载。**
 
-### 官方公共解析已停用：三条替代方案
+### 官方公共解析已停用：可选方案总览
 
-**结论先说：上游那个公开解析服务已经封了，用不了，也不会自己恢复。** 下面三条路按省事程度排序，第一条最省事。本项目无法、也不打算通过其他方式取回公开地址的访问权。
+**结论先说：上游那个公开解析服务已经封了，用不了，也不会自己恢复。** 本项目无法、也不打算通过其他方式取回公开地址的访问权。
 
 这个 `401` 不是偶发故障，是上游**主动加的访问控制**：
 
@@ -229,11 +240,85 @@ python3 scripts/transcribe.py --input-file /path/to/video.mp4 --output-dir ./sub
 - 上游作者在 [issue #495](https://github.com/ltaoo/wx_channels_download/issues/495)（2026-08-13）说明：该服务依赖的**元宝账号被封禁**，「后续会增加凭证校验功能」。
 - 上游部署文档（`deploy sph`）要求注入 `ACCESS_CREDENTIAL` 作为「页面及 API 的访问凭证」，**认证失败返回 401，未配置返回 503**；支持 `Authorization: Bearer <凭证>` 与 Basic Auth `wxchannels:<凭证>`。凭证由**部署者自己设定**，第三方无从获取。
 
-顺带说明：**这个 401 是绕不过去的**。微信官方分享页自己也是带着登录 token 去查的（`get_feed_info` 需要 `generalToken`），外部浏览器裸访问同样拿不到播放地址——不是换个请求头就能解决。
+顺带说明：**这个 401 是绕不过去的**。微信官方分享页自己也是带着登录 token 去查的（`get_feed_info` 需要 `generalToken`），而且那段取流逻辑**只在微信环境内执行**（见 [关于「用浏览器抓包」](#关于用浏览器抓包为什么在普通浏览器里抓不到)）——不是换个请求头就能解决。
+
+### 先说风险：用不用你自己的账号，是分水岭
+
+| | 方案 | 需要什么 | 账号风险 | 能自动化吗 |
+|---|---|---|---|---|
+| ⭐ | A. 完全离线 | 什么都不用 | **无** | 半自动（需先拿到视频文件或直链） |
+| ⚠️ | B. 本机直跑 | 你的元宝 Cookie | **有**，落在元宝账号 | 全自动 |
+| ⚠️ | C. 自建 Worker | Cloudflare + 你的元宝 Cookie | **有**，同 B（且暴露面更大） | 全自动 |
+
+**风险具体是什么，说清楚：**
+
+1. **风险落在元宝账号上，不是你的微信/QQ。** 元宝隐私政策写的是：同一手机号注册过混元系产品则账号关联，但「**各产品可分别进行账号注销或封号等账号处置**」。所以元宝被封**不一定**牵连微信，但因为登录授权来自微信/QQ，关联风险无法完全排除——**别拿主号试**。
+2. **上游为什么被封？因为它把 Cookie 放到了公开服务上，一个账号服务大量陌生人。** 触发条件是**异常流量规模**，不是"用了这个接口"本身。本机低频自用（每天几条）风险显著更低，**但不是零**。
+3. **Cookie 就是登录凭证**（`hy_user`、`hy_token`），一旦泄漏等于账号被接管。所以：不要提交到仓库、不要发给任何人、不要部署成公开服务。
+4. 同类项目 [`ucmao/media-parser`](https://github.com/ucmao/media-parser) 的文档给了同样的建议：`YUANBAO_COOKIE` 属于个人账号登录隐私凭证，「**强烈建议使用闲置小号**进行配置」。
+
+**如果你决定用 B/C，建议这么做：**
+
+- 用**闲置小号**登录元宝（不要用主号），只在小号上承担风险。
+- 只在**本机低频**使用，绝不做成公开服务、绝不分享 Cookie。
+- 用完可以在元宝里**退出登录**让该 Cookie 失效，需要时再重新登录复制。
+- 心里有数：Cookie 约 1 个月过期，脚本会明确提示失效，重登即可。
+
+**如果你不想承担任何账号风险**，直接看方案 A —— 它不需要任何凭证。
 
 ---
 
-### 方案一：本机直跑解析（最省事）
+### 方案 A：完全离线零风险
+
+不碰任何账号凭证，代价是要想办法把视频弄到本地或拿到直链。三种入口，脚本都支持：
+
+**A1. 视频已经落到本地 → `--input-file`**
+
+用任何合法方式拿到视频文件（微信 PC 客户端配上游 [`ltaoo/wx_channels_download`](https://github.com/ltaoo/wx_channels_download) 会出现下载按钮、手机端录屏、作者本人授权导出等），直接转写：
+
+```bash
+python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
+```
+
+**A2. 已经有播放地址 → `--video-url`**
+
+```bash
+python3 scripts/transcribe.py --video-url "https://finder.video.qq.com/....mp4" --output-dir ./subtitles
+```
+
+**A3. 有抓包文件 → `--har`（自动提取直链）**
+
+用 Charles / mitmproxy / Proxifier 之类的代理工具抓包，导出 HAR（或直接把抓到的 URL 列表存成文本），交给脚本自动挑出视频地址：
+
+```bash
+python3 scripts/transcribe.py --har ./capture.har --output-dir ./subtitles
+```
+
+脚本会给候选地址打分（`video.qq.com` 域名、`video/*` MIME、`.mp4` 后缀），列出候选再选用；**如果只有分片流（`.m4s` / `.ts`）或出现多个同权重候选，它会拒绝乱猜并让你手动用 `--video-url` 指定**，不会静默挑一个错的。
+
+**别试 yt-dlp**：官方 yt-dlp **没有**视频号提取器，`yt-dlp <分享链接>` 走不通。
+
+### 关于「用浏览器抓包」：为什么在普通浏览器里抓不到
+
+网上有些教程说"把链接发给元宝网页版 → 点卡片 → 浏览器播放 → 用插件嗅探地址"。**这条在普通浏览器里走不通**，我们从官方分享页的 JS 里确认了原因：
+
+```js
+const ti = Ba(), { noRedirect: ai } = xe();
+if (ti === Ma.WECHAT && !ai) {          // ← 只有微信环境才进这个分支
+  const n = se().token || Xa("token") || "";
+  return o ? (await Ka.getFeedInfo({ baseReq: { generalToken: n }, ... })).data.sceneInfo : void 0
+}
+```
+
+- 取播放数据的代码**被包在 `ti === Ma.WECHAT` 判断里**，即只有微信内置环境（存在 `WeixinJSBridge`）才会执行；普通浏览器走的是「跳转/提示去微信打开」的分支。
+- 拿到页面 HTML 也没用：分享页是约 2.6 KB 的空壳 SPA，数据全靠 JS 拉。
+- 所以**想抓包，得在微信客户端那个环境里抓**（微信 PC 客户端 + 代理工具最顺手），抓到的结果用 `--har` 或 `--video-url` 交给脚本。
+
+---
+
+### 方案 B：本机直跑解析
+
+> ⚠️ **这一节会用到你的元宝账号。动手前请先读 [先说风险](#先说风险用不用你自己的账号是分水岭)，并且按那里的建议用闲置小号。**
 
 上游 Worker 的核心其实就是三个 HTTP 请求，**不需要 Cloudflare，在本机直接跑就行**，只要你有自己的元宝登录 Cookie：
 
@@ -255,13 +340,13 @@ python3 scripts/transcribe.py "https://weixin.qq.com/sph/AOVsoW8dBI"            
 
 设了 `YUANBAO_COOKIE` 后脚本自动走本机链路，不再访问 `WECHAT_VIDEO_API_URL`。Cookie 通过标准输入传给 curl，不会出现在命令行、进程列表或日志里。
 
-> ⚠️ 两点提醒：Cookie 约 1 个月过期，过期后重新复制即可（脚本会明确提示 Cookie 失效）；上游那个公开服务正是因为元宝账号被封才停的，**用它意味着你的元宝账号承担同样的风险**，请自行判断并遵守服务条款。
+> ⚠️ 三点提醒：Cookie 约 1 个月过期，过期后重新复制即可（脚本会明确提示 Cookie 失效）；上游那个公开服务正是因为元宝账号被封才停的，**用它意味着你的元宝账号承担同样的风险**；所以**请用闲置小号**，不要用主号。
 
 ---
 
-### 方案二：自建 Cloudflare 查询 Worker
+### 方案 C：自建 Cloudflare 查询 Worker
 
-比方案一多一层部署，好处是不依赖本机 Cookie 文件、可以给其他设备共用。
+比方案 B 多一层部署，好处是不依赖本机 Cookie 文件、可以给其他设备共用。**注意：账号风险与方案 B 完全相同**，而且一旦你把这个 Worker 的地址和凭证分享给别人，就复现了上游被封的那个场景（一个账号服务大量陌生人）。
 
 前提：一个 Cloudflare 账号 + 登录元宝后取到的 Web cookie。
 
@@ -292,31 +377,9 @@ python3 scripts/transcribe.py "https://weixin.qq.com/sph/AOVsoW8dBI"            
 
    能打印出标题/作者就说明通了，去掉 `--resolve-only` 即可跑完整流程。
 
-> ⚠️ 上游明确提示：**仅自己使用，不要对外提供**。
+> ⚠️ 上游明确提示：**仅自己使用，不要对外提供**。公开地址一旦传播开，就等于重现上游被封的那个场景。
 
 ---
-
-### 方案三：完全绕开解析
-
-不需要任何凭证和账号，代价是要手动拿到直链或视频文件。
-
-**3a. 已经有播放地址 → `--video-url`**
-
-从抓包 / 开发者工具 / 浏览器 Network 里拿到 `finder.video.qq.com` 的 `.mp4` 地址，直接交给脚本：
-
-```bash
-python3 scripts/transcribe.py --video-url "https://finder.video.qq.com/....mp4" --output-dir ./subtitles
-```
-
-**3b. 视频已经落到本地 → `--input-file`**
-
-用 [`ltaoo/wx_channels_download`](https://github.com/ltaoo/wx_channels_download) 的上游客户端（微信 PC 端视频号页面会出现下载按钮），或其它抓包工具把视频存下来：
-
-```bash
-python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
-```
-
-**别试 yt-dlp**：官方 yt-dlp **没有**视频号提取器——播放地址只在微信 App 内通过 `WeixinJSBridge` 下发，网页不暴露，所以 `yt-dlp <分享链接>` 走不通。
 
 ### 实测结论
 
@@ -326,13 +389,14 @@ python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
 | 经本机 HTTP 代理访问 | `HTTP 401 {"error":"unauthorized"}` |
 | 公开部署是否还会恢复 | **不会**：上游元宝账号被封后已加凭证校验，凭证由部署者自设，第三方拿不到（上游 issue #495 + 部署文档） |
 | 微信短链信息接口 `get_feed_info` | 匿名请求（无 `generalToken`）一律 `HTTP 401 permission verification failed`，拿不到任何数据 |
-| 微信官方分享页自身 | 也是带登录 token 去查（JS 里 `getFeedInfo({baseReq:{generalToken: token}})`），外部浏览器裸访问同样无播放地址 |
-| 元宝 `get_parse_result` | 域名国内直连可用（约 0.15 s）；匿名调用返回 `HTTP 401 {"error":{"code":"20000"}}`，需要登录态 |
-| 本机直跑链路（方案一） | 代码已内置，18 项 mock 场景测试通过（含 token/eid 提取、Cookie 失效提示、Cookie 不泄漏、微信拒绝回显）；**真机链路未验证**（测试环境无元宝 Cookie） |
-| `--video-url` / `--input-file`（方案三） | 端到端通过（桩 ffmpeg/whisper） |
-| 完整下载 + 转写 | 方案一/二的**真机全链路均未验证**（缺凭证），测试机也未安装 `ffmpeg` / `whisper` |
+| 微信官方分享页自身 | 取流逻辑被 `ti === Ma.WECHAT` 包住（读自官方 `feed.*.js`），**只有微信环境才执行**；普通浏览器抓不到播放地址 |
+| 元宝 `get_parse_result` | 域名国内直连可用（约 0.15 s）；匿名调用返回 `HTTP 401`，需要登录态 |
+| 本机直跑链路（方案 B） | 代码已内置，19 项 mock 场景测试通过（含 token/eid 提取、Cookie 失效提示、Cookie 不泄漏、微信拒绝回显、多来源互斥）；**真机链路未验证**（测试环境无元宝 Cookie） |
+| `--har`（方案 A3） | 12 项场景测试通过：分片中挑出完整 mp4、仅分片时拒绝并提示、多候选时拒绝乱选、纯文本 URL 列表、端到端产出 SRT+逐字稿且不访问任何解析接口 |
+| `--video-url` / `--input-file`（方案 A） | 端到端通过（桩 ffmpeg/whisper） |
+| 完整下载 + 转写 | 方案 B/C 的**真机全链路均未验证**（缺凭证）；测试机也未安装 `ffmpeg` / `whisper` / `brew` |
 
-结论：**官方公共解析已停用，这是服务方的设计而非脚本故障，且绕不过去**。三条替代路径都已写清，脚本对三种输入方式都支持；`--video-url` 与 `--input-file` 完全不需要任何凭证，本机直跑链路只需要你自己的元宝 Cookie。
+结论：**官方公共解析已停用，这是服务方的设计而非脚本故障，且绕不过去**。方案 A（`--input-file` / `--video-url` / `--har`）完全不需要任何账号凭证，零风险；方案 B/C 只需要你自己的元宝 Cookie，代价是**你自己的元宝账号承担封号风险**——这也是上游那个服务倒掉的原因。
 
 ## License
 
