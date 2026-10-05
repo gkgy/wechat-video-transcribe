@@ -20,6 +20,9 @@
     python3 transcribe.py --video-url "https://finder.video.qq.com/....mp4" --output-dir ./subtitles
     python3 transcribe.py --har capture.har --output-dir ./subtitles
 
+中文输出默认为简体：脚本会自动给 Whisper 加一句普通话提示词（--initial-prompt 可覆盖或关闭），
+否则 Whisper 经常输出繁体。--language 默认 Chinese，可改成其它语言。
+
 环境变量:
     YUANBAO_COOKIE          元宝 Web 端 Cookie；设定后本机直跑解析，不需要自建服务
     WECHAT_VIDEO_API_URL    自建解析接口地址（公共默认地址已停用）
@@ -310,16 +313,23 @@ def extract_audio(video_path: str, audio_path: str) -> None:
     print(f"  已保存: {audio_path}")
 
 
-def transcribe(audio_path: str, model: str, output_dir: str) -> None:
+SIMPLIFIED_HINT = "以下是普通话的句子。"
+
+
+def transcribe(audio_path: str, model: str, output_dir: str,
+               language: str = "Chinese", initial_prompt: str | None = None) -> None:
     """Run Whisper CLI to generate SRT."""
     print(f"\n🎙️  Whisper 转写中（模型: {model}）…")
-    run([
+    cmd = [
         "whisper", audio_path,
-        "--language", "Chinese",
+        "--language", language,
         "--model", model,
         "--output_format", "srt",
         "--output_dir", output_dir,
-    ], timeout=1800)
+    ]
+    if initial_prompt:
+        cmd += ["--initial_prompt", initial_prompt]
+    run(cmd, timeout=1800)
     print(f"  字幕已保存到 {output_dir}/")
 
 
@@ -441,6 +451,11 @@ def main():
     parser.add_argument("--resolve-only", action="store_true", help="仅验证链接解析，不下载或转写")
     parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium"],
                         help="Whisper 模型大小 (默认: base)")
+    parser.add_argument("--language", default="Chinese",
+                        help="Whisper 识别语言 (默认: Chinese)")
+    parser.add_argument("--initial-prompt", default=None,
+                        help="Whisper 提示词。中文默认用「以下是普通话的句子。」以避免输出繁体；"
+                             "传空字符串可关闭")
     parser.add_argument("--output-dir", default="./", help="输出目录 (默认: ./)")
     args = parser.parse_args()
 
@@ -465,6 +480,12 @@ def main():
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Whisper 默认会用繁体输出中文；给一句普通话提示词可强制简体并改善标点。
+    initial_prompt = args.initial_prompt
+    if initial_prompt is None:
+        initial_prompt = SIMPLIFIED_HINT if args.language.strip().lower() in (
+            "chinese", "zh", "mandarin", "zh-cn", "cmn") else ""
+
     with tempfile.TemporaryDirectory() as tmpdir:
         video_path = os.path.join(tmpdir, "video.mp4")
         audio_path = os.path.join(tmpdir, "audio.wav")
@@ -486,7 +507,7 @@ def main():
         extract_audio(video_path, audio_path)
 
         # Step 4: Transcribe
-        transcribe(audio_path, args.model, str(output_dir))
+        transcribe(audio_path, args.model, str(output_dir), args.language, initial_prompt)
 
         # Step 5: Plain text
         srt_file = output_dir / "audio.srt"

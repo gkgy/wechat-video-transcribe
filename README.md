@@ -53,11 +53,37 @@
 ### 一键安装
 
 ```bash
-# macOS
+# macOS（Homebrew）
 brew install curl ffmpeg
-
-# 安装 Whisper
 pip install openai-whisper
+```
+
+没有 Homebrew，或不想装 Homebrew 时，可以用 pip 拿到一份完整的 ffmpeg 二进制：
+
+```bash
+python3 -m venv ~/.venv/wvt && source ~/.venv/wvt/bin/activate
+pip install openai-whisper imageio-ffmpeg
+
+# 把 imageio-ffmpeg 自带的 ffmpeg 接入 PATH（~/.local/bin 需已在 PATH 中）
+ln -sf "$(python -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())')" ~/.local/bin/ffmpeg
+```
+
+这样装出来的 ffmpeg 是完整构建（含 libx264 / libmp3lame），本项目用到的 `mp4 → 16kHz 单声道 wav` 完全够用。
+whisper 会连带装 PyTorch，磁盘占用约 1 GB；模型文件首次运行自动下载（base 约 145 MB，small 约 460 MB，medium 约 1.5 GB）。
+
+### 中文输出说明
+
+Whisper 在处理中文时**默认经常输出繁体**。脚本已默认给 Whisper 加一句普通话提示词，强制简体并改善标点；需要覆盖或关闭：
+
+```bash
+# 自定义提示词（例如带专有名词，可显著提升这些词的识别率）
+python3 scripts/transcribe.py --input-file ./video.mp4 --initial-prompt "以下是普通话的句子。关键词：动力保障、离心冷水机组。"
+
+# 关闭提示词（恢复 Whisper 原生行为，可能输出繁体）
+python3 scripts/transcribe.py --input-file ./video.mp4 --initial-prompt ""
+
+# 非中文内容
+python3 scripts/transcribe.py --input-file ./video.mp4 --language English
 ```
 
 ## 快速开始
@@ -115,6 +141,8 @@ python3 scripts/transcribe.py "<链接>"
 python3 scripts/transcribe.py "<链接>" --model medium
 ```
 
+实测对比（同一段中文语音，2026-10-05）：`base` 会把「语音」听成「与音」、漏掉结尾短句；`small` 把「语音」正确识别，但仍有同音字错误。**对准确率有要求就用 `small` 起步**；`base` 适合快速预览。
+
 ## 手动工作流
 
 如果你想要更精细的控制，也可以分步执行：
@@ -153,8 +181,9 @@ curl -L -o video.mp4 \
 # 3. 提取音频
 ffmpeg -i video.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 audio.wav
 
-# 4. Whisper 转写
-whisper audio.wav --language Chinese --model base --output_format srt --output_dir .
+# 4. Whisper 转写（--initial_prompt 用于强制简体中文，可选）
+whisper audio.wav --language Chinese --model base --output_format srt --output_dir . \
+  --initial_prompt "以下是普通话的句子。"
 
 # 5. 提取纯文本
 awk 'NR%4==3' audio.srt > transcript.txt
@@ -394,7 +423,9 @@ python3 scripts/transcribe.py "https://weixin.qq.com/sph/AOVsoW8dBI"            
 | 本机直跑链路（方案 B） | 代码已内置，19 项 mock 场景测试通过（含 token/eid 提取、Cookie 失效提示、Cookie 不泄漏、微信拒绝回显、多来源互斥）；**真机链路未验证**（测试环境无元宝 Cookie） |
 | `--har`（方案 A3） | 12 项场景测试通过：分片中挑出完整 mp4、仅分片时拒绝并提示、多候选时拒绝乱选、纯文本 URL 列表、端到端产出 SRT+逐字稿且不访问任何解析接口 |
 | `--video-url` / `--input-file`（方案 A） | 端到端通过（桩 ffmpeg/whisper） |
-| 完整下载 + 转写 | 方案 B/C 的**真机全链路均未验证**（缺凭证）；测试机也未安装 `ffmpeg` / `whisper` / `brew` |
+| **下载 → 提取音频 → Whisper 转写（真机）** | **已验证通过**（2026-10-05，macOS arm64）：ffmpeg 7.1 完整构建 + openai-whisper 20250625（torch 2.14.1），用本机 TTS 生成的 9 秒中文语音 mp4 跑完整流程，正常产出 `audio.srt` 与 `transcript.txt` |
+| 中文输出简繁 | Whisper 原生输出**繁体**；脚本默认加普通话提示词后输出简体（`--initial-prompt ""` 可关闭，实测两种行为均符合预期） |
+| 完整下载 + 转写（方案 B/C） | **真机未验证**：缺元宝 Cookie / 自建 Worker 凭证。转写后半段（ffmpeg + Whisper）已验证，未验证的只剩「拿到播放地址」这一步 |
 
 结论：**官方公共解析已停用，这是服务方的设计而非脚本故障，且绕不过去**。方案 A（`--input-file` / `--video-url` / `--har`）完全不需要任何账号凭证，零风险；方案 B/C 只需要你自己的元宝 Cookie，代价是**你自己的元宝账号承担封号风险**——这也是上游那个服务倒掉的原因。
 

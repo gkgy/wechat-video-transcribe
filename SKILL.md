@@ -16,6 +16,22 @@ description: 微信视频号视频下载 + 语音转文字（Whisper）。提取
 - `ffmpeg` — 提取音频
 - `whisper` CLI — 语音识别（`pip install openai-whisper` 后自动安装）
 
+只有 `--resolve-only` 时不需要 `ffmpeg` / `whisper`。
+
+安装（macOS，无 Homebrew 也可）：
+
+```bash
+brew install curl ffmpeg && pip install openai-whisper
+
+# 没有 Homebrew 时用 pip 拿一份完整的 ffmpeg 二进制
+pip install imageio-ffmpeg
+ln -sf "$(python -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())')" ~/.local/bin/ffmpeg
+```
+
+whisper 会连带装 PyTorch（约 1 GB）；模型首次运行自动下载（base ≈145 MB、small ≈460 MB、medium ≈1.5 GB）。
+
+**中文必须给提示词**：Whisper 处理中文时默认容易输出**繁体**。脚本已默认加「以下是普通话的句子。」强制简体，无需额外操作；用户要求改口径时用 `--initial-prompt`，要求非中文用 `--language`。转写质量上 `base` 常有同音字错误，**对准确率有要求时建议 `small` 起步**。
+
 ## 前提：默认公共解析接口已停用，按**风险从低到高**选路径
 
 **默认调用的公共解析服务 `sph.litao.workers.dev` 已经不能用了。** 该地址属于上游项目 [`ltaoo/wx_channels_download`](https://github.com/ltaoo/wx_channels_download)，其依赖的元宝账号被封停后，作者给 Worker 加了凭证校验，匿名请求一律返回 `HTTP 401 {"error":"unauthorized"}`。凭证由部署者自己设定，第三方拿不到，**公开地址不会自行恢复，这个 401 也绕不过去**。
@@ -133,7 +149,9 @@ ffmpeg -i video.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 audio.wav
 ### Step 4：Whisper 转写
 
 ```bash
-whisper audio.wav --language Chinese --model base --output_format srt --output_dir .
+# --initial_prompt 用于避免输出繁体，中文场景务必带上
+whisper audio.wav --language Chinese --model base --output_format srt --output_dir . \
+  --initial_prompt "以下是普通话的句子。"
 ```
 
 模型选择（准确率与速度权衡）：
@@ -178,6 +196,10 @@ python3 scripts/transcribe.py --video-url "https://finder.video.qq.com/....mp4" 
 # 零风险：转写已下载到本地的视频/音频
 python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
 
+# 中文默认已自动加「以下是普通话的句子。」避免繁体；可用 --initial-prompt 覆盖，或改语言
+python3 scripts/transcribe.py --input-file ./video.mp4 --initial-prompt "关键词：动力保障、离心冷水机组。"
+python3 scripts/transcribe.py --input-file ./video.mp4 --language English
+
 # 本机直跑解析（需要用户自己的元宝 Cookie，⚠️ 有账号风险）
 export YUANBAO_COOKIE="<元宝 Web 端 Cookie>"
 
@@ -199,7 +221,8 @@ export WECHAT_VIDEO_PROXY="http://127.0.0.1:<你的代理端口>"
 - **普通浏览器抓不到播放地址**：官方分享页 JS 里取流那段被 `ti === Ma.WECHAT` 包住，只在微信环境（存在 `WeixinJSBridge`）执行；分享页 HTML 只是约 2.6 KB 的空壳 SPA。要抓包得在微信客户端环境里抓，然后走 `--har` / `--video-url`。
 - 元宝 `get_parse_result` 国内直连可用（约 0.15 s），匿名调用返回 `HTTP 401`。
 - 官方 yt-dlp **没有**视频号提取器，不要建议这条路径。
-- 测试覆盖：响应与错误场景 14/14、端到端 3/3、本机直跑链路 19/19、`--har` 12/12（均为 mock/桩测试）。**本机直跑与自建 Worker 的「真机全链路」未验证**（测试环境没有元宝 Cookie，也没装 `ffmpeg`/`whisper`）。对外说明时必须如实标注这一点。
+- 测试覆盖：响应与错误场景 14/14、端到端 3/3、本机直跑链路 19/19、`--har` 12/12（均为 mock/桩测试）。
+- **转写后半段已真机验证**（2026-10-05，macOS arm64）：ffmpeg 7.1 + openai-whisper 20250625（torch 2.14.1），用本机 TTS 生成的中文语音 mp4 跑通「提取音频 → Whisper → 输出 SRT + 逐字稿」。未验证的只剩**「拿到播放地址」这一步**（缺元宝 Cookie / 自建 Worker 凭证），对外说明时必须如实标注这一点。
 
 ## 解析不可用时怎么办
 
