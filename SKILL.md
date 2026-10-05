@@ -16,12 +16,12 @@ description: 微信视频号视频下载 + 语音转文字（Whisper）。提取
 - `ffmpeg` — 提取音频
 - `whisper` CLI — 语音识别（`pip install openai-whisper` 后自动安装）
 
-## 前提：解析接口需要访问凭证
+## 前提：默认公共解析接口已停用，需自建查询 Worker
 
-自 2026-10-05 起，默认第三方解析服务 `sph.litao.workers.dev` 已启用访问控制，匿名请求返回 `HTTP 401 {"error":"unauthorized"}`。
+**默认调用的公共解析服务 `sph.litao.workers.dev` 已经不能用了。** 该地址属于上游项目 [`ltaoo/wx_channels_download`](https://github.com/ltaoo/wx_channels_download)，其依赖的元宝账号被封停后，作者给 Worker 加了凭证校验，匿名请求一律返回 `HTTP 401 {"error":"unauthorized"}`。凭证由部署者自己设定，第三方拿不到，**公开地址不会自行恢复**。
 
-- 链接解析**必须**提供服务方签发的凭证，通过 `WECHAT_VIDEO_API_TOKEN` 注入（脚本以 `Authorization: Bearer` 发送，不写文件、不打印到日志）。
-- 无凭证时不要尝试绕过鉴权：改用 `--input-file` 转写用户已下载的本地视频，或告知用户需要向服务方申请凭证。
+- 想解析链接，**必须由使用者自己部署一个查询 Worker**，把 `WECHAT_VIDEO_API_URL` 指向它、把 `WECHAT_VIDEO_API_TOKEN` 设成自己设的 `sphCredential`；脚本已经支持，无需改代码。
+- 没建 Worker 时不要尝试绕过鉴权：改用 `--input-file` 转写用户已下载的本地视频，并如实告知链接解析不可用。
 - 需要代理时设置 `WECHAT_VIDEO_PROXY`（curl 本身也遵循 `https_proxy` / `ALL_PROXY`）。
 - 拿到标题、作者或封面**不代表**视频可下载，务必确认响应里有播放地址。
 
@@ -29,8 +29,10 @@ description: 微信视频号视频下载 + 语音转文字（Whisper）。提取
 
 ### Step 1：解析视频号链接，获取真实视频 URL
 
+> 默认地址 `sph.litao.workers.dev` 已停用（401），必须替换为使用者自建的 Worker 地址。
+
 ```bash
-curl -s -X POST "https://sph.litao.workers.dev/api/fetch_video_profile" \
+curl -s -X POST "https://<你的 worker>/api/fetch_video_profile" \
   -H "Content-Type: application/json" \
   -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
   -H "Authorization: Bearer <WECHAT_VIDEO_API_TOKEN>" \
@@ -106,7 +108,7 @@ python3 scripts/transcribe.py <微信视频号链接> --resolve-only
 python3 scripts/transcribe.py --input-file ./video.mp4 --output-dir ./subtitles
 
 # 解析与下载走代理
-export WECHAT_VIDEO_PROXY="http://127.0.0.1:10808"
+export WECHAT_VIDEO_PROXY="http://127.0.0.1:<你的代理端口>"
 ```
 
 脚本会区分并明确报出：HTTP 401/403（鉴权）、网络超时/连接失败、非 JSON 响应、其他非 2xx 状态、以及 2xx 但缺少播放地址。下载失败（链接过期等）通过 `curl --fail` 直接报错，不会把错误页存成视频文件。
@@ -114,13 +116,13 @@ export WECHAT_VIDEO_PROXY="http://127.0.0.1:10808"
 ## 已知限制（2026-10-05 实测）
 
 - 匿名调用 `sph.litao.workers.dev` 返回 `HTTP 401`，本机直连该域名还会超时，需要代理。
-- **这个 401 是上游的设计，不是脚本故障**：该项目依赖的元宝账号被封，作者在 [issue #495](https://github.com/ltaoo/wx_channels_download/issues/495)（2026-08-13）宣布「后续会增加凭证校验」，其 `deploy sph` 文档要求注入 `ACCESS_CREDENTIAL` 作为访问凭证（认证失败 401 / 未配置 503）。凭证由部署者自己设定，第三方拿不到。
+- **官方公共解析已经封了，不是脚本故障**：该项目依赖的元宝账号被封，作者在 [issue #495](https://github.com/ltaoo/wx_channels_download/issues/495)（2026-08-13）宣布「后续会增加凭证校验」，其 `deploy sph` 文档要求注入 `ACCESS_CREDENTIAL` 作为访问凭证（认证失败 401 / 未配置 503）。凭证由部署者自己设定，第三方拿不到，公开地址不会恢复。
 - 微信短链信息接口 `channels.weixin.qq.com/finder-preview/api/feed/get_feed_info` 匿名至多给出作者、描述、封面，没有播放地址；本次复测直接返回 `permission verification failed`。用其中的 `dynamicExportId` 当 `exportId` 再查同样失败。
-- 因此**完整下载 + 转写链路在用户自备凭证前不可用**，不要对外声称已恢复。
+- 因此**完整下载 + 转写链路在用户自建 Worker 之前不可用**，不要对外声称已恢复。
 
-## 凭证拿不到时怎么办
+## 解析接口不可用时怎么办
 
 按用户的实际需求二选一，不要尝试绕过鉴权：
 
-1. **要自动化解析** → 让用户按上游文档自建自己的 `sph` Worker（`wx_video_download deploy sph`，需要 Cloudflare 账号 + 元宝 Web cookie），拿到 `sphCredential` 后设置 `WECHAT_VIDEO_API_URL` 与 `WECHAT_VIDEO_API_TOKEN`，再用 `--resolve-only` 验证。提醒上游「仅自己使用」的警告与 cookie 被限制的风险。
+1. **要自动化解析** → 让用户按上游文档**自建自己的 `sph` Worker**：`wx_video_download deploy sph`，需要 Cloudflare 账号、Workers 读写权限的 API Token、元宝 Web cookie（约 1 个月过期）以及自设的 `sphCredential`。部署后设置 `WECHAT_VIDEO_API_URL` 与 `WECHAT_VIDEO_API_TOKEN`，先用 `--resolve-only` 验证。提醒上游「仅自己使用」的警告与 cookie 被限制的风险。
 2. **只需一次转写** → 让用户用上游客户端把视频下载到本地，再用 `--input-file` 转写，这条路径不依赖任何凭证。
